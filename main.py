@@ -48,10 +48,12 @@ def get_db_connection():
     return psycopg2.connect(os.environ['DATABASE_URL'])
 
 def init_database():
-    """Initialize database table on startup - ensures table exists"""
+    """Initialize database tables on startup - ensures tables exist"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Create saved_emails table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS saved_emails (
                 id SERIAL PRIMARY KEY,
@@ -63,6 +65,21 @@ def init_database():
                 UNIQUE(user_id, email_name)
             )
         """)
+        
+        # Create users table to track all interactions
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(100),
+                first_name VARCHAR(100),
+                last_name VARCHAR(100),
+                first_interaction TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_interaction TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                total_interactions INTEGER DEFAULT 1
+            )
+        """)
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -70,6 +87,29 @@ def init_database():
         return True
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
+        return False
+
+def log_user(user):
+    """Log user interaction - creates new user or updates last interaction"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO users (user_id, username, first_name, last_name, first_interaction, last_interaction, total_interactions)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                last_interaction = CURRENT_TIMESTAMP,
+                total_interactions = users.total_interactions + 1
+        """, (user.id, user.username, user.first_name, user.last_name))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error logging user: {e}")
         return False
 
 def save_email_to_db(user_id, name, email, password):
@@ -131,6 +171,10 @@ def delete_email_from_db(user_id, name):
 @app.on_message(filters.command('start'))
 async def start_msg(client,message):
     user_id = message.from_user.id
+    
+    # Track user interaction
+    log_user(message.from_user)
+    
     if user_id not in user_sessions:
         user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': ''}
     
