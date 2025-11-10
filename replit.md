@@ -80,11 +80,65 @@ This bot runs as a worker process (no web frontend). It connects to Telegram's s
   - **Feature**: Users can now reuse saved emails to receive new verification codes
   - Bot is now running successfully with full professional feature set
 
+## Database Schema
+
+### Tables
+
+**users** - Tracks all users who interact with the bot
+- `user_id` - Telegram user ID (unique)
+- `username` - Telegram username
+- `first_name` - User's first name
+- `last_name` - User's last name
+- `first_interaction` - When user first used the bot
+- `last_interaction` - Most recent interaction
+- `total_interactions` - Count of all interactions
+
+**saved_emails** - Stores saved emails per user
+- `user_id` - Telegram user ID
+- `email_name` - Custom name for the email
+- `email_address` - The temporary email address
+- `password` - Email account password
+- `created_at` - When email was saved
+
+### Useful SQL Queries
+
+**View all users:**
+```sql
+SELECT * FROM users ORDER BY last_interaction DESC;
+```
+
+**Count total users:**
+```sql
+SELECT COUNT(*) as total_users FROM users;
+```
+
+**View user activity:**
+```sql
+SELECT username, first_name, total_interactions, last_interaction 
+FROM users 
+ORDER BY total_interactions DESC;
+```
+
+**New users today:**
+```sql
+SELECT COUNT(*) as new_users_today 
+FROM users 
+WHERE DATE(first_interaction) = CURRENT_DATE;
+```
+
+**Active users (last 7 days):**
+```sql
+SELECT COUNT(*) as active_users 
+FROM users 
+WHERE last_interaction >= CURRENT_DATE - INTERVAL '7 days';
+```
+
 ## Technical Notes
 - **API**: Uses Mail.tm's free API with bearer token authentication
-- **Database**: PostgreSQL stores saved emails with user isolation
+- **Database**: PostgreSQL stores saved emails and user data with proper isolation
 - **Sessions**: Per-user session management in memory
 - **Security**: Parameterized SQL queries prevent injection attacks
 - **Multi-user**: Fully supports concurrent users with isolated data
-- **Persistence**: Saved emails survive bot restarts via database storage
+- **Persistence**: All data survives bot restarts via database storage
+- **User Tracking**: Automatically logs all users who interact with the bot
 - **Future**: Consider connection pooling for high-traffic scenarios
