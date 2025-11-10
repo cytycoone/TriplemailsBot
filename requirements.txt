@@ -1,0 +1,10 @@
+pyrogram
+TgCrypto
+requests
+wget
+
+pyrogram
+requests
+TgCrypto
+wget
+psycopg2-binary
