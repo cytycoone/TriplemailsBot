@@ -47,6 +47,40 @@ user_sessions = {}
 def get_db_connection():
     return psycopg2.connect(os.environ['DATABASE_URL'])
 
+def generate_1secmail():
+    try:
+        resp = re.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1", timeout=10)
+        if resp.status_code == 200:
+            emails = resp.json()
+            if emails and len(emails) > 0:
+                email = emails[0]
+                login, domain = email.split('@')
+                return {'email': email, 'login': login, 'domain': domain}
+        return None
+    except Exception as e:
+        print(f"Error generating 1secmail: {e}")
+        return None
+
+def check_1secmail_messages(login, domain):
+    try:
+        resp = re.get(f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+    except Exception as e:
+        print(f"Error checking 1secmail messages: {e}")
+        return []
+
+def read_1secmail_message(login, domain, msg_id):
+    try:
+        resp = re.get(f"https://www.1secmail.com/api/v1/?action=readMessage&login={login}&domain={domain}&id={msg_id}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception as e:
+        print(f"Error reading 1secmail message: {e}")
+        return None
+
 def init_database():
     """Initialize database tables on startup - ensures tables exist"""
     try:
@@ -61,6 +95,7 @@ def init_database():
                 email_name VARCHAR(100) NOT NULL,
                 email_address VARCHAR(255) NOT NULL,
                 password VARCHAR(255) NOT NULL,
+                email_service VARCHAR(50) DEFAULT 'mailtm',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, email_name)
             )
@@ -112,13 +147,13 @@ def log_user(user):
         print(f"Error logging user: {e}")
         return False
 
-def save_email_to_db(user_id, name, email, password):
+def save_email_to_db(user_id, name, email, password, email_service='mailtm'):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO saved_emails (user_id, email_name, email_address, password) VALUES (%s, %s, %s, %s) ON CONFLICT (user_id, email_name) DO UPDATE SET email_address = %s, password = %s",
-            (user_id, name, email, password, email, password)
+            "INSERT INTO saved_emails (user_id, email_name, email_address, password, email_service) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (user_id, email_name) DO UPDATE SET email_address = %s, password = %s, email_service = %s",
+            (user_id, name, email, password, email_service, email, password, email_service)
         )
         conn.commit()
         cur.close()
@@ -132,7 +167,7 @@ def get_saved_emails(user_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT email_name, email_address FROM saved_emails WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+        cur.execute("SELECT email_name, email_address, email_service FROM saved_emails WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
         emails = cur.fetchall()
         cur.close()
         conn.close()
@@ -145,7 +180,7 @@ def load_email_from_db(user_id, name):
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT email_address, password FROM saved_emails WHERE user_id = %s AND email_name = %s", (user_id, name))
+        cur.execute("SELECT email_address, password, email_service FROM saved_emails WHERE user_id = %s AND email_name = %s", (user_id, name))
         result = cur.fetchone()
         cur.close()
         conn.close()
@@ -176,7 +211,7 @@ async def start_msg(client,message):
     log_user(message.from_user)
     
     if user_id not in user_sessions:
-        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': ''}
+        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': '', 'email_service': None, 'login': None, 'domain': None}
     
     welcome_text = f"""**👋 Welcome {message.from_user.first_name}!**
 
@@ -186,6 +221,7 @@ This bot allows you to generate disposable email addresses to protect your priva
 
 **🎯 Features:**
 • Generate unlimited temporary emails
+• Multiple email services (1secMail & Mail.tm)
 • Receive and read messages instantly
 • Save emails for future reuse
 • Manage multiple email addresses
@@ -218,17 +254,22 @@ async def help_msg(client, message):
 /current - Show your current active email
 
 **Button Actions:**
-📧 Generate New - Create a fresh temporary email
+📧 Generate New - Create a fresh temporary email (choose service)
 🔄 Refresh - Check for new messages
 💾 Save Email - Save current email for reuse
 📋 My Emails - View all saved emails
 📖 View Message - Read full message content
+
+**📬 Email Services:**
+• **1secMail** - Fast, no registration, better for bypassing blocks
+• **Mail.tm** - Secure, password-protected emails
 
 **💡 Pro Tips:**
 • Save emails you want to reuse later
 • Use descriptive names when saving (e.g., "gaming", "shopping")
 • Load saved emails to receive new verification codes
 • Multiple users can use the bot simultaneously
+• Try different services if one is blocked
 
 **🔒 Privacy:** All emails are temporary and anonymous. No personal data is stored."""
     
@@ -239,21 +280,64 @@ async def mailbox(client,message):
     user_id = message.from_user.id
     
     if user_id not in user_sessions:
-        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': ''}
+        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': '', 'email_service': None, 'login': None, 'domain': None}
     
     if response=='generate':
+        service_buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton('⚡ 1secMail (Fast)', callback_data='gen_1secmail')],
+            [InlineKeyboardButton('🔐 Mail.tm (Secure)', callback_data='gen_mailtm')],
+            [InlineKeyboardButton('❌ Cancel', callback_data='close')]
+        ])
+        await message.edit_message_text('**📧 Choose Email Service:**\n\n⚡ **1secMail** - Fast, no registration, better for bypassing blocks\n🔐 **Mail.tm** - Secure, password-protected emails\n\nSelect your preferred service:', reply_markup=service_buttons)
+    
+    elif response=='gen_1secmail':
+        try:
+            import random
+            import string
+            
+            await message.edit_message_text('🔄 Generating 1secMail address...')
+            
+            email_data = generate_1secmail()
+            if not email_data:
+                await message.edit_message_text('❌ Unable to generate 1secMail. Please try again.', reply_markup=buttons)
+                return
+            
+            user_sessions[user_id]['email'] = email_data['email']
+            user_sessions[user_id]['email_service'] = '1secmail'
+            user_sessions[user_id]['login'] = email_data['login']
+            user_sessions[user_id]['domain'] = email_data['domain']
+            user_sessions[user_id]['password'] = ''
+            user_sessions[user_id]['auth_token'] = None
+            user_sessions[user_id]['idnum'] = None
+            
+            await message.edit_message_text(
+                f'**✅ Email Generated Successfully!**\n\n'
+                f'📧 Your temporary email:\n`{email_data["email"]}`\n\n'
+                f'🔧 Service: **1secMail**\n'
+                f'⚡ Fast delivery, no authentication required\n\n'
+                f'💡 Use the buttons below to manage your inbox.',
+                reply_markup=buttons
+            )
+            print(f"Generated 1secmail for user {user_id}: {email_data['email']}")
+        except Exception as e:
+            print(f"Error generating 1secmail: {e}")
+            await message.edit_message_text('❌ Unable to generate email. Please try again.', reply_markup=buttons)
+    
+    elif response=='gen_mailtm':
        try:
            import random
            import string
            
+           await message.edit_message_text('🔄 Generating Mail.tm address...')
+           
            domains_resp = re.get("https://api.mail.tm/domains", timeout=10)
            if domains_resp.status_code != 200:
-               await message.answer('Sorry, the email service is currently unavailable. Please try again later.', show_alert=True)
+               await message.edit_message_text('❌ Mail.tm service unavailable. Try 1secMail instead.', reply_markup=buttons)
                return
            
            domains = domains_resp.json()['hydra:member']
            if not domains:
-               await message.answer('Sorry, no email domains available.', show_alert=True)
+               await message.edit_message_text('❌ No Mail.tm domains available.', reply_markup=buttons)
                return
            
            domain = domains[0]['domain']
@@ -268,7 +352,7 @@ async def mailbox(client,message):
            account_resp = re.post("https://api.mail.tm/accounts", json=account_data, timeout=10)
            
            if account_resp.status_code != 201:
-               await message.answer('Sorry, unable to create email account. Please try again.', show_alert=True)
+               await message.edit_message_text('❌ Unable to create Mail.tm account. Try 1secMail instead.', reply_markup=buttons)
                return
            
            token_data = {
@@ -281,23 +365,58 @@ async def mailbox(client,message):
                user_sessions[user_id]['email'] = email
                user_sessions[user_id]['auth_token'] = token_resp.json()['token']
                user_sessions[user_id]['password'] = password
+               user_sessions[user_id]['email_service'] = 'mailtm'
+               user_sessions[user_id]['login'] = None
+               user_sessions[user_id]['domain'] = None
                user_sessions[user_id]['idnum'] = None
-               await message.edit_message_text(f'**✅ Email Generated Successfully!**\n\n📧 Your temporary email:\n`{email}`\n\n💡 Use the buttons below to manage your inbox.',
-                                           reply_markup=buttons)
-               print(f"Generated email for user {user_id}: {email}")
+               await message.edit_message_text(
+                   f'**✅ Email Generated Successfully!**\n\n'
+                   f'📧 Your temporary email:\n`{email}`\n\n'
+                   f'🔧 Service: **Mail.tm**\n'
+                   f'🔐 Secure and password-protected\n\n'
+                   f'💡 Use the buttons below to manage your inbox.',
+                   reply_markup=buttons
+               )
+               print(f"Generated Mail.tm email for user {user_id}: {email}")
            else:
-               await message.answer('Sorry, authentication failed. Please try again.', show_alert=True)
+               await message.edit_message_text('❌ Authentication failed. Try 1secMail instead.', reply_markup=buttons)
                
        except Exception as e:
-           print(f"Error generating email: {e}")
-           await message.answer('Sorry, unable to generate email at this moment. Please try again later.', show_alert=True)
+           print(f"Error generating Mail.tm email: {e}")
+           await message.edit_message_text('❌ Unable to generate Mail.tm email. Try 1secMail instead.', reply_markup=buttons)
     elif response=='refresh':
         session = user_sessions[user_id]
-        print(f"Refreshing for user {user_id}, email: {session['email']}")
+        print(f"Refreshing for user {user_id}, email: {session['email']}, service: {session.get('email_service')}")
         try:
-            if not session['email'] or not session['auth_token']:
+            if not session['email']:
                 await message.edit_message_text('Generate an email first',reply_markup=buttons)
-            else: 
+                return
+            
+            service = session.get('email_service', 'mailtm')
+            
+            if service == '1secmail':
+                if not session.get('login') or not session.get('domain'):
+                    await message.answer('Email session expired. Please generate a new email.', show_alert=True)
+                    return
+                
+                messages_data = check_1secmail_messages(session['login'], session['domain'])
+                
+                if not messages_data:
+                    await message.answer(f'No messages were received..\nin your Mailbox {session["email"]}')
+                    return
+                
+                latest_msg = messages_data[0]
+                user_sessions[user_id]['idnum'] = latest_msg['id']
+                from_msg = latest_msg.get('from', 'Unknown')
+                subject = latest_msg.get('subject', 'No Subject')
+                refreshrply = 'You have a message from '+from_msg+'\n\nSubject : '+subject
+                await message.edit_message_text(refreshrply, reply_markup=msg_buttons)
+                
+            else:
+                if not session['auth_token']:
+                    await message.answer('Email session expired. Please generate a new email.', show_alert=True)
+                    return
+                
                 headers = {
                     'Authorization': f'Bearer {session["auth_token"]}'
                 }
@@ -318,43 +437,73 @@ async def mailbox(client,message):
                 from_msg = latest_msg['from']['address']
                 subject = latest_msg['subject']
                 refreshrply = 'You have a message from '+from_msg+'\n\nSubject : '+subject
-                await message.edit_message_text(refreshrply,
-                                                reply_markup=msg_buttons)
+                await message.edit_message_text(refreshrply, reply_markup=msg_buttons)
+                
         except Exception as e:
             print(f"Error refreshing messages for user {user_id}: {e}")
             await message.answer(f'No messages were received..\nin your Mailbox {session["email"]}')
     elif response=='view_msg':
         session = user_sessions[user_id]
-        if not session['idnum'] or not session['auth_token']:
+        if not session['idnum']:
             await message.answer('Please refresh to check for messages first!', show_alert=True)
             return
         
         try:
-            headers = {
-                'Authorization': f'Bearer {session["auth_token"]}'
-            }
-            msg_resp = re.get(f"https://api.mail.tm/messages/{session['idnum']}", headers=headers, timeout=10)
+            service = session.get('email_service', 'mailtm')
             
-            if msg_resp.status_code != 200:
-                await message.answer('Unable to load message. Please try again.', show_alert=True)
-                return
-            
-            msg = msg_resp.json()
-            print(msg)
-            
-            from_mail = msg['from']['address'] if isinstance(msg['from'], dict) else msg['from']
-            date = msg['createdAt']
-            subjectt = msg['subject']
-            body = msg['text'] if msg.get('text') else msg.get('html', '')[:500]
-            
-            mailbox_view = f"From: {from_mail}\nDate: {date}\nSubject: {subjectt}\n\nMessage:\n{body}"
-            
-            attachments = msg.get('attachments', [])
-            if attachments and len(attachments) > 0:
-                attachment_list = '\n\nAttachments:\n' + '\n'.join([f"- {att['filename']}" for att in attachments])
-                mailbox_view += attachment_list
-            
-            await message.edit_message_text(mailbox_view, reply_markup=buttons)
+            if service == '1secmail':
+                msg = read_1secmail_message(session['login'], session['domain'], session['idnum'])
+                
+                if not msg:
+                    await message.answer('Unable to load message. Please try again.', show_alert=True)
+                    return
+                
+                print(msg)
+                
+                from_mail = msg.get('from', 'Unknown')
+                date = msg.get('date', 'Unknown')
+                subjectt = msg.get('subject', 'No Subject')
+                body = msg.get('textBody', msg.get('body', ''))[:500]
+                
+                mailbox_view = f"From: {from_mail}\nDate: {date}\nSubject: {subjectt}\n\nMessage:\n{body}"
+                
+                attachments = msg.get('attachments', [])
+                if attachments and len(attachments) > 0:
+                    attachment_list = '\n\nAttachments:\n' + '\n'.join([f"- {att.get('filename', 'file')}" for att in attachments])
+                    mailbox_view += attachment_list
+                
+                await message.edit_message_text(mailbox_view, reply_markup=buttons)
+                
+            else:
+                if not session['auth_token']:
+                    await message.answer('Email session expired. Please generate a new email.', show_alert=True)
+                    return
+                
+                headers = {
+                    'Authorization': f'Bearer {session["auth_token"]}'
+                }
+                msg_resp = re.get(f"https://api.mail.tm/messages/{session['idnum']}", headers=headers, timeout=10)
+                
+                if msg_resp.status_code != 200:
+                    await message.answer('Unable to load message. Please try again.', show_alert=True)
+                    return
+                
+                msg = msg_resp.json()
+                print(msg)
+                
+                from_mail = msg['from']['address'] if isinstance(msg['from'], dict) else msg['from']
+                date = msg['createdAt']
+                subjectt = msg['subject']
+                body = msg['text'] if msg.get('text') else msg.get('html', '')[:500]
+                
+                mailbox_view = f"From: {from_mail}\nDate: {date}\nSubject: {subjectt}\n\nMessage:\n{body}"
+                
+                attachments = msg.get('attachments', [])
+                if attachments and len(attachments) > 0:
+                    attachment_list = '\n\nAttachments:\n' + '\n'.join([f"- {att['filename']}" for att in attachments])
+                    mailbox_view += attachment_list
+                
+                await message.edit_message_text(mailbox_view, reply_markup=buttons)
             
         except Exception as e:
             print(f"Error viewing message: {e}")
@@ -375,7 +524,9 @@ async def mailbox(client,message):
         
         email_list = "**📋 Your Saved Emails:**\n\n"
         for idx, email_data in enumerate(saved_emails, 1):
-            email_list += f"{idx}. **{email_data['email_name']}**\n   `{email_data['email_address']}`\n\n"
+            service_icon = '⚡' if email_data.get('email_service') == '1secmail' else '🔐'
+            service_name = '1secMail' if email_data.get('email_service') == '1secmail' else 'Mail.tm'
+            email_list += f"{idx}. **{email_data['email_name']}** {service_icon}\n   `{email_data['email_address']}`\n   Service: {service_name}\n\n"
         
         email_list += "\n💡 **Commands:**\n"
         email_list += "• `/load <name>` - Load a saved email\n"
@@ -390,50 +541,15 @@ async def mailbox(client,message):
 async def generate_cmd(client, message):
     user_id = message.from_user.id
     if user_id not in user_sessions:
-        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': ''}
+        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': '', 'email_service': None, 'login': None, 'domain': None}
     
-    status_msg = await message.reply("🔄 Generating your temporary email...")
+    service_buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton('⚡ 1secMail (Fast)', callback_data='gen_1secmail')],
+        [InlineKeyboardButton('🔐 Mail.tm (Secure)', callback_data='gen_mailtm')],
+        [InlineKeyboardButton('❌ Cancel', callback_data='close')]
+    ])
     
-    try:
-        import random
-        import string
-        
-        domains_resp = re.get("https://api.mail.tm/domains", timeout=10)
-        if domains_resp.status_code != 200:
-            await status_msg.edit('❌ Email service unavailable. Please try again later.')
-            return
-        
-        domains = domains_resp.json()['hydra:member']
-        if not domains:
-            await status_msg.edit('❌ No email domains available.')
-            return
-        
-        domain = domains[0]['domain']
-        username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        email = f"{username}@{domain}"
-        password = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-        
-        account_data = {'address': email, 'password': password}
-        account_resp = re.post("https://api.mail.tm/accounts", json=account_data, timeout=10)
-        
-        if account_resp.status_code != 201:
-            await status_msg.edit('❌ Unable to create email account. Please try again.')
-            return
-        
-        token_data = {'address': email, 'password': password}
-        token_resp = re.post("https://api.mail.tm/token", json=token_data, timeout=10)
-        
-        if token_resp.status_code == 200:
-            user_sessions[user_id]['email'] = email
-            user_sessions[user_id]['auth_token'] = token_resp.json()['token']
-            user_sessions[user_id]['password'] = password
-            user_sessions[user_id]['idnum'] = None
-            await status_msg.edit(f'**✅ Email Generated Successfully!**\n\n📧 Your temporary email:\n`{email}`\n\n💡 Use the buttons below to manage your inbox.', reply_markup=buttons)
-        else:
-            await status_msg.edit('❌ Authentication failed. Please try again.')
-    except Exception as e:
-        print(f"Error in /generate: {e}")
-        await status_msg.edit('❌ Unable to generate email. Please try again later.')
+    await message.reply('**📧 Choose Email Service:**\n\n⚡ **1secMail** - Fast, no registration, better for bypassing blocks\n🔐 **Mail.tm** - Secure, password-protected emails\n\nSelect your preferred service:', reply_markup=service_buttons)
 
 @app.on_message(filters.command('list'))
 async def list_cmd(client, message):
@@ -446,7 +562,9 @@ async def list_cmd(client, message):
     
     email_list = "**📋 Your Saved Emails:**\n\n"
     for idx, email_data in enumerate(saved_emails, 1):
-        email_list += f"{idx}. **{email_data['email_name']}**\n   `{email_data['email_address']}`\n\n"
+        service_icon = '⚡' if email_data.get('email_service') == '1secmail' else '🔐'
+        service_name = '1secMail' if email_data.get('email_service') == '1secmail' else 'Mail.tm'
+        email_list += f"{idx}. **{email_data['email_name']}** {service_icon}\n   `{email_data['email_address']}`\n   Service: {service_name}\n\n"
     
     email_list += "\n💡 **Available Commands:**\n"
     email_list += "• `/load <name>` - Load a saved email\n"
@@ -477,8 +595,11 @@ async def save_cmd(client, message):
         await message.reply('❌ Name too long! Please use a name under 50 characters.')
         return
     
-    if save_email_to_db(user_id, name, session['email'], session['password']):
-        await message.reply(f'✅ **Email Saved Successfully!**\n\n📧 Email: `{session["email"]}`\n💾 Saved as: **{name}**\n\nUse `/load {name}` to reuse this email anytime!')
+    email_service = session.get('email_service', 'mailtm')
+    service_name = '1secMail' if email_service == '1secmail' else 'Mail.tm'
+    
+    if save_email_to_db(user_id, name, session['email'], session.get('password', ''), email_service):
+        await message.reply(f'✅ **Email Saved Successfully!**\n\n📧 Email: `{session["email"]}`\n🔧 Service: **{service_name}**\n💾 Saved as: **{name}**\n\nUse `/load {name}` to reuse this email anytime!')
     else:
         await message.reply('❌ Failed to save email. Please try again.')
 
@@ -486,7 +607,7 @@ async def save_cmd(client, message):
 async def load_cmd(client, message):
     user_id = message.from_user.id
     if user_id not in user_sessions:
-        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': ''}
+        user_sessions[user_id] = {'email': '', 'auth_token': None, 'idnum': None, 'saved_emails': {}, 'password': '', 'email_service': None, 'login': None, 'domain': None}
     
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
@@ -503,17 +624,38 @@ async def load_cmd(client, message):
     status_msg = await message.reply(f'🔄 Loading email **{name}**...')
     
     try:
-        token_data = {'address': email_data['email_address'], 'password': email_data['password']}
-        token_resp = re.post("https://api.mail.tm/token", json=token_data, timeout=10)
+        email_service = email_data.get('email_service', 'mailtm')
+        service_name = '1secMail' if email_service == '1secmail' else 'Mail.tm'
         
-        if token_resp.status_code == 200:
-            user_sessions[user_id]['email'] = email_data['email_address']
-            user_sessions[user_id]['auth_token'] = token_resp.json()['token']
-            user_sessions[user_id]['password'] = email_data['password']
-            user_sessions[user_id]['idnum'] = None
-            await status_msg.edit(f'✅ **Email Loaded Successfully!**\n\n📧 Active email: `{email_data["email_address"]}`\n💾 Loaded from: **{name}**\n\n💡 Use the "Refresh" button to check for new messages!', reply_markup=buttons)
+        if email_service == '1secmail':
+            email_address = email_data['email_address']
+            if '@' in email_address:
+                login, domain = email_address.split('@')
+                user_sessions[user_id]['email'] = email_address
+                user_sessions[user_id]['email_service'] = '1secmail'
+                user_sessions[user_id]['login'] = login
+                user_sessions[user_id]['domain'] = domain
+                user_sessions[user_id]['password'] = ''
+                user_sessions[user_id]['auth_token'] = None
+                user_sessions[user_id]['idnum'] = None
+                await status_msg.edit(f'✅ **Email Loaded Successfully!**\n\n📧 Active email: `{email_address}`\n🔧 Service: **{service_name}**\n💾 Loaded from: **{name}**\n\n💡 Use the "Refresh" button to check for new messages!', reply_markup=buttons)
+            else:
+                await status_msg.edit('❌ Invalid email format for 1secMail.')
         else:
-            await status_msg.edit('❌ Failed to authenticate saved email. It may have expired.')
+            token_data = {'address': email_data['email_address'], 'password': email_data['password']}
+            token_resp = re.post("https://api.mail.tm/token", json=token_data, timeout=10)
+            
+            if token_resp.status_code == 200:
+                user_sessions[user_id]['email'] = email_data['email_address']
+                user_sessions[user_id]['auth_token'] = token_resp.json()['token']
+                user_sessions[user_id]['password'] = email_data['password']
+                user_sessions[user_id]['email_service'] = 'mailtm'
+                user_sessions[user_id]['login'] = None
+                user_sessions[user_id]['domain'] = None
+                user_sessions[user_id]['idnum'] = None
+                await status_msg.edit(f'✅ **Email Loaded Successfully!**\n\n📧 Active email: `{email_data["email_address"]}`\n🔧 Service: **{service_name}**\n💾 Loaded from: **{name}**\n\n💡 Use the "Refresh" button to check for new messages!', reply_markup=buttons)
+            else:
+                await status_msg.edit('❌ Failed to authenticate saved email. It may have expired.')
     except Exception as e:
         print(f"Error in /load: {e}")
         await status_msg.edit('❌ Unable to load email. Please try again.')
@@ -540,7 +682,11 @@ async def current_cmd(client, message):
         return
     
     session = user_sessions[user_id]
-    await message.reply(f'**📧 Current Active Email:**\n\n`{session["email"]}`\n\n💡 Use `/save <name>` to save this email for future use.', reply_markup=buttons)
+    service = session.get('email_service', 'mailtm')
+    service_name = '1secMail' if service == '1secmail' else 'Mail.tm'
+    service_icon = '⚡' if service == '1secmail' else '🔐'
+    
+    await message.reply(f'**📧 Current Active Email:**\n\n`{session["email"]}`\n🔧 Service: **{service_name}** {service_icon}\n\n💡 Use `/save <name>` to save this email for future use.', reply_markup=buttons)
 
 @app.on_message(filters.text & filters.private)
 async def handle_text(client, message):
@@ -553,8 +699,11 @@ async def handle_text(client, message):
             await message.reply('❌ Name too long! Please use a name under 50 characters.')
             return
         
-        if save_email_to_db(user_id, name, session['email'], session['password']):
-            await message.reply(f'✅ **Email Saved Successfully!**\n\n📧 Email: `{session["email"]}`\n💾 Saved as: **{name}**\n\nUse `/load {name}` to reuse this email anytime!', reply_markup=buttons)
+        email_service = session.get('email_service', 'mailtm')
+        service_name = '1secMail' if email_service == '1secmail' else 'Mail.tm'
+        
+        if save_email_to_db(user_id, name, session['email'], session.get('password', ''), email_service):
+            await message.reply(f'✅ **Email Saved Successfully!**\n\n📧 Email: `{session["email"]}`\n🔧 Service: **{service_name}**\n💾 Saved as: **{name}**\n\nUse `/load {name}` to reuse this email anytime!', reply_markup=buttons)
         else:
             await message.reply('❌ Failed to save email. Please try again.')
         
