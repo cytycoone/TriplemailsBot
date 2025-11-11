@@ -1,7 +1,7 @@
 # TempMail Telegram Bot
 
 ## Overview
-This is a Telegram bot that generates temporary email addresses using the Mail.tm API. Users can generate random temporary emails, check for new messages, and view message contents with attachments directly through Telegram. The bot supports multiple concurrent users with isolated mailbox sessions.
+This is a Telegram bot that generates temporary email addresses using two different services: Mail.tm and 1secMail. Users can choose between fast generation (1secMail) or secure password-protected emails (Mail.tm). The bot supports multiple concurrent users with isolated mailbox sessions and can save/reuse emails across both services.
 
 ## Project Type
 Telegram Bot (Python/Pyrogram)
@@ -9,12 +9,16 @@ Telegram Bot (Python/Pyrogram)
 ## Architecture
 - **Language**: Python 3.11
 - **Framework**: Pyrogram (Telegram Bot API)
-- **API**: Mail.tm for temporary email generation and management
+- **Email APIs**: 
+  - Mail.tm - Secure password-protected emails
+  - 1secMail - Fast no-auth email generation
 - **Session Management**: Per-user sessions stored in memory
+- **Database**: PostgreSQL for persistent email storage and user tracking
 - **Dependencies**: 
   - pyrogram - Telegram bot framework
   - TgCrypto - Cryptography for Pyrogram
-  - requests - HTTP requests to Mail.tm API
+  - requests - HTTP requests to email APIs
+  - psycopg2-binary - PostgreSQL database adapter
   - wget - File downloading for email attachments (future use)
 
 ## Configuration
@@ -24,7 +28,11 @@ The bot requires three environment variables (configured as secrets):
 - `API_HASH` - Telegram API Hash from https://my.telegram.org
 
 ## Features
+- **Dual Email Services** - Choose between two providers:
+  - ⚡ **1secMail** - Fast generation, no authentication, different domains
+  - 🔐 **Mail.tm** - Secure with password protection, reliable delivery
 - **Generate** unlimited temporary email addresses
+- **Better Website Support** - Different domains help bypass email blocks
 - **Save emails** with custom names for future reuse
 - **Load saved emails** to receive new verification codes
 - **Manage multiple emails** with list, delete, and current commands
@@ -35,7 +43,7 @@ The bot requires three environment variables (configured as secrets):
   - Message body
   - Attachments list
 - **Professional UI** with emoji buttons and intuitive navigation
-- **PostgreSQL storage** for persistent email management
+- **PostgreSQL storage** for persistent email management across both services
 
 ## Deployment
 This bot runs as a worker process (no web frontend). It connects to Telegram's servers and listens for user commands.
@@ -63,6 +71,14 @@ This bot runs as a worker process (no web frontend). It connects to Telegram's s
 - ❌ **Close** - End current session
 
 ## Recent Changes
+- 2025-11-11: Multi-Service Integration
+  - **Feature**: Added 1secMail as second email service alongside Mail.tm
+  - **Feature**: Users can now choose between two email services with different benefits
+  - **Database**: Added `email_service` column to track which service each saved email uses
+  - **Enhancement**: Better website compatibility with multiple email domains
+  - **Fix**: Updated init_database() to include email_service column for fresh deployments
+  - Bot now offers ⚡ 1secMail (fast) and 🔐 Mail.tm (secure) options
+
 - 2025-11-10: Initial Replit setup and API migration
   - **Setup**: Added Python 3.11 environment
   - **Setup**: Installed dependencies via pip (pyrogram, TgCrypto, requests, wget, psycopg2-binary)
